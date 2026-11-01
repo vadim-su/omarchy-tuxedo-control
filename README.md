@@ -41,9 +41,8 @@ Panel.qml ──reads──▶ /run/tuxctl/status.json ◀──writes── tux
 ## Install
 
 ```bash
-git clone https://github.com/vadim-su/omarchy-tuxedo-control ~/.config/omarchy/plugins/kosto.tuxedo
+omarchy plugin add https://github.com/vadim-su/omarchy-tuxedo-control --enable
 sudo ~/.config/omarchy/plugins/kosto.tuxedo/backend/install.sh
-omarchy bar put kosto.tuxedo --before omarchy.power
 ```
 
 `install.sh` copies `tuxctl` to `/usr/local/bin`, installs and starts
@@ -56,7 +55,7 @@ updating `backend/tuxctl`.
 sudo systemctl disable --now tuxctl.service
 sudo rm /etc/systemd/system/tuxctl.service /usr/local/bin/tuxctl /etc/sudoers.d/tuxctl
 sudo rm -r /etc/tuxctl
-rm -r ~/.config/omarchy/plugins/kosto.tuxedo
+omarchy plugin remove kosto.tuxedo
 ```
 
 ## Notes
