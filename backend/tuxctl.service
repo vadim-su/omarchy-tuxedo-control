@@ -5,6 +5,8 @@ ConditionPathExists=/dev/tuxedo_io
 
 [Service]
 ExecStart=/usr/local/bin/tuxctl daemon
+# Runs after any exit (crash, SIGKILL, OOM): never leave a manual fan duty behind.
+ExecStopPost=/usr/local/bin/tuxctl fan-auto
 RuntimeDirectory=tuxctl
 RuntimeDirectoryMode=0755
 Restart=on-failure

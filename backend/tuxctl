@@ -4,6 +4,7 @@
   tuxctl daemon            root service: re-applies saved settings, runs fan curves,
                            publishes /run/tuxctl/status.json for the shell plugin
   tuxctl set KEY VALUE     root (via sudo): validate, apply, persist one setting
+  tuxctl fan-auto          root: hand fans back to firmware (systemd ExecStopPost)
   tuxctl status            print current status JSON
 """
 import fcntl, json, os, signal, struct, sys, time
@@ -138,46 +139,69 @@ def open_dev():
     return fd
 
 
+def log(msg):
+    print(f"tuxctl: {msg}", file=sys.stderr, flush=True)
+
+
 def daemon():
     fd = open_dev()
-    state, mtime, current = load_state(), None, None
+    # SystemExit unwinds through the finally below, which restores firmware fan control.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+    try:
+        fan_loop(fd)
+    finally:
+        ioctl_write(fd, W_FANAUTO, 0)  # layer 1; ExecStopPost=tuxctl fan-auto is layer 2
 
-    def stop(*_):
-        ioctl_write(fd, W_FANAUTO, 0)  # hand fans back to the EC on exit
-        sys.exit(0)
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
+
+def fan_loop(fd):
+    state, mtime, current, failures = load_state(), None, None, 0
 
     for key, value in state.items():  # EC forgets some settings across power cycles
         if key != "fan":
             try:
                 apply(fd, key, value)
             except OSError as e:
-                print(f"tuxctl: restore {key}: {e}", file=sys.stderr)
+                log(f"restore {key}: {e}")
 
     while True:
-        m = os.stat(STATE).st_mtime if os.path.exists(STATE) else None
-        if m != mtime:
-            mtime, prev = m, state["fan"]
-            state = load_state()
-            if state["fan"] == "auto" and prev != "auto":
-                ioctl_write(fd, W_FANAUTO, 0)
+        try:
+            m = os.stat(STATE).st_mtime if os.path.exists(STATE) else None
+            if m != mtime:
+                mtime, prev = m, state["fan"]
+                state = load_state()
+                if state["fan"] == "auto" and prev != "auto":
+                    ioctl_write(fd, W_FANAUTO, 0)
+                    current = None
+            if state["fan"] in CURVES:
+                temp = max(ioctl_read(fd, R_TEMP1), ioctl_read(fd, R_TEMP2))
+                target = curve_percent(CURVES[state["fan"]], temp)
+                # Spin up at once, slow down by at most 5%/tick so the fan does not pulse.
+                current = target if current is None or target >= current else max(target, current - 5)
+                duty = round(current * FAN_MAX / 100)
+                ioctl_write(fd, W_FAN1, duty)
+                ioctl_write(fd, W_FAN2, duty)
+            failures = 0
+        except OSError as e:
+            # Layer 3: never hold a stale manual duty while blind to temperature.
+            failures += 1
+            log(f"fan control error ({failures}): {e}")
+            if failures == 3:
+                log("falling back to firmware fan control")
+                ioctl_write(fd, W_FANAUTO, 0)  # if this fails too, the daemon exits via finally
                 current = None
-        if state["fan"] in CURVES:
-            temp = max(ioctl_read(fd, R_TEMP1), ioctl_read(fd, R_TEMP2))
-            target = curve_percent(CURVES[state["fan"]], temp)
-            # Spin up at once, slow down by at most 5%/tick so the fan does not pulse.
-            current = target if current is None or target >= current else max(target, current - 5)
-            duty = round(current * FAN_MAX / 100)
-            ioctl_write(fd, W_FAN1, duty)
-            ioctl_write(fd, W_FAN2, duty)
-        write_atomic(STATUS, json.dumps(status(fd, state)))
+        try:
+            write_atomic(STATUS, json.dumps(status(fd, state)))
+        except OSError as e:
+            log(f"status: {e}")
         time.sleep(2)
 
 
 def main(argv):
     if argv[:1] == ["daemon"]:
         daemon()
+    elif argv[:1] == ["fan-auto"]:
+        ioctl_write(open_dev(), W_FANAUTO, 0)
     elif argv[:1] == ["status"]:
         fd = open_dev() if os.access(DEV, os.R_OK | os.W_OK) else None
         print(json.dumps(status(fd, load_state()), indent=2))

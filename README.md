@@ -26,8 +26,11 @@ Panel.qml ──reads──▶ /run/tuxctl/status.json ◀──writes── tux
 
 - `tuxctl daemon` — systemd service. Re-applies saved settings at boot, runs
   the fan curves (re-evaluated every ~2 s, every curve reaches 100% by 90 °C),
-  publishes status for the panel, and hands the fans back to the firmware on
-  exit.
+  publishes status for the panel. Fail-safe: the fans go back to firmware
+  control on any daemon exit (a `finally` block, plus `ExecStopPost=tuxctl
+  fan-auto` for crashes and SIGKILL) and after 3 consecutive failed
+  temperature reads or fan writes; the curve resumes once the EC answers again.
+- `tuxctl fan-auto` — hand the fans back to the firmware.
 - `tuxctl set KEY VALUE` — validates against a whitelist, applies, persists.
   The installer grants your user passwordless sudo for exactly the 17
   `tuxctl set KEY VALUE` commands the panel issues — no wildcards.
