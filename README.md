@@ -3,7 +3,7 @@
 An [Omarchy](https://omarchy.org/) bar widget that does what TUXEDO Control
 Center does on Uniwill-based TUXEDO laptops, inside the Omarchy shell.
 
-<img src="assets/screenshot.png" alt="TUXEDO Control panel open from the Omarchy bar" width="420">
+<img src="preview.png" alt="TUXEDO Control panel open from the Omarchy bar" width="420">
 
 - **Battery charge limit** — 100% / 90% / 80% (firmware charging profiles)
 - **CPU profile** — Quiet / Balanced / Boost (embedded-controller power mode)
@@ -29,7 +29,8 @@ Panel.qml ──reads──▶ /run/tuxctl/status.json ◀──writes── tux
   publishes status for the panel, and hands the fans back to the firmware on
   exit.
 - `tuxctl set KEY VALUE` — validates against a whitelist, applies, persists.
-  The installer lets your user run only this subcommand via passwordless sudo.
+  The installer grants your user passwordless sudo for exactly the 17
+  `tuxctl set KEY VALUE` commands the panel issues — no wildcards.
 - `tuxctl status` — print the status JSON.
 
 ## Requirements
