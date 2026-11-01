@@ -3,6 +3,8 @@
 An [Omarchy](https://omarchy.org/) bar widget that does what TUXEDO Control
 Center does on Uniwill-based TUXEDO laptops, inside the Omarchy shell.
 
+<img src="assets/screenshot.png" alt="TUXEDO Control panel open from the Omarchy bar" width="420">
+
 - **Battery charge limit** — 100% / 90% / 80% (firmware charging profiles)
 - **CPU profile** — Quiet / Balanced / Boost (embedded-controller power mode)
 - **Fans** — Auto (firmware) or temperature curves: Quiet, Balanced, Cool, Max
