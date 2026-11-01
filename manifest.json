@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "kosto.tuxedo",
+  "name": "TUXEDO Control",
+  "version": "1.0.0",
+  "author": "kosto",
+  "license": "MIT",
+  "description": "Battery charge limit, CPU profile, fan curves, Fn lock, USB power share and AC auto-boot for TUXEDO (Uniwill) laptops.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "TUXEDO Control",
+    "description": "TUXEDO Control Center in the bar: charge limit, CPU profile, fans and hardware toggles.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

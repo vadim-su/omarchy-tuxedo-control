@@ -1,0 +1,196 @@
+#!/usr/bin/python3
+"""TUXEDO (Uniwill) laptop control: battery charge profile, CPU profile, fans, toggles.
+
+  tuxctl daemon            root service: re-applies saved settings, runs fan curves,
+                           publishes /run/tuxctl/status.json for the shell plugin
+  tuxctl set KEY VALUE     root (via sudo): validate, apply, persist one setting
+  tuxctl status            print current status JSON
+"""
+import fcntl, json, os, signal, struct, sys, time
+
+STATE = "/etc/tuxctl/state.json"
+STATUS = "/run/tuxctl/status.json"
+KB = "/sys/devices/platform/tuxedo_keyboard"
+BAT = "/sys/class/power_supply/BAT0"
+DEV = "/dev/tuxedo_io"
+SYSFS = {
+    "charging_profile": KB + "/charging_profile/charging_profile",
+    "fn_lock": KB + "/fn_lock",
+    "usb_powershare": KB + "/usb_powershare/usb_powershare",
+    "ac_auto_boot": KB + "/ac_auto_boot/ac_auto_boot",
+}
+
+# Linux _IOC encoding; the driver declares every arg as a pointer (8 bytes on x86_64).
+PTR = struct.calcsize("P")
+def _ior(t, nr): return (2 << 30) | (PTR << 16) | (t << 8) | nr
+def _iow(t, nr): return (1 << 30) | (PTR << 16) | (t << 8) | nr
+MAGIC, R_UW, W_UW = 0xEC, 0xEC + 3, 0xEC + 4
+R_HWCHECK_UW = _ior(MAGIC, 0x06)
+R_FAN1, R_FAN2, R_TEMP1, R_TEMP2, R_MODE = (_ior(R_UW, n) for n in (0x10, 0x11, 0x12, 0x13, 0x14))
+R_PROFS_AVAILABLE = _ior(R_UW, 0x21)
+W_FAN1, W_FAN2, W_PERF_PROF = _iow(W_UW, 0x10), _iow(W_UW, 0x11), _iow(W_UW, 0x18)
+W_FANAUTO = (W_UW << 8) | 0x14  # _IO: no argument
+FAN_MAX = 200  # NB02_FAN_SPEED_MAX: EC fan duty 0..200
+
+PERF = {"power_save": 1, "enthusiast": 2, "overboost": 3}
+# (°C, %) points, linear in between; every curve reaches 100% by 90°C.
+CURVES = {
+    "quiet":    [(55, 0), (65, 25), (75, 45), (85, 75), (90, 100)],
+    "balanced": [(45, 0), (55, 25), (68, 45), (80, 75), (88, 100)],
+    "cool":     [(35, 25), (50, 40), (65, 65), (78, 100)],
+    "max":      [(0, 100)],
+}
+FANS = ["auto", *CURVES]
+DEFAULT = {"fan": "auto"}
+
+
+def ioctl_read(fd, req):
+    buf = bytearray(4)
+    fcntl.ioctl(fd, req, buf, True)
+    return struct.unpack("i", buf)[0]
+
+
+def ioctl_write(fd, req, value):
+    fcntl.ioctl(fd, req, struct.pack("i", value))
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def write_atomic(path, text, mode=0o644):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def load_state():
+    try:
+        with open(STATE) as f:
+            return {**DEFAULT, **json.load(f)}
+    except (OSError, ValueError):
+        return dict(DEFAULT)
+
+
+def perf_from_mode(mode):
+    return "power_save" if mode & 0xA0 == 0xA0 else "overboost" if mode & 0x10 else "enthusiast"
+
+
+def curve_percent(curve, temp):
+    if temp <= curve[0][0]:
+        return curve[0][1]
+    for (t0, p0), (t1, p1) in zip(curve, curve[1:]):
+        if temp <= t1:
+            return p0 + (p1 - p0) * (temp - t0) / (t1 - t0)
+    return curve[-1][1]
+
+
+def validate(key, value):
+    if key == "charging_profile":
+        ok = value in (read(KB + "/charging_profile/charging_profiles_available") or "").split()
+    elif key in ("fn_lock", "usb_powershare", "ac_auto_boot"):
+        ok = value in ("0", "1")
+    elif key == "perf_profile":
+        ok = value in PERF
+    elif key == "fan":
+        ok = value in FANS
+    else:
+        ok = False
+    if not ok:
+        sys.exit(f"tuxctl: invalid {key}={value!r}")
+
+
+def apply(fd, key, value):
+    if key in SYSFS:
+        with open(SYSFS[key], "w") as f:
+            f.write(value)
+    elif key == "perf_profile":
+        ioctl_write(fd, W_PERF_PROF, PERF[value])
+    # "fan" is applied by the daemon loop, which watches the state file.
+
+
+def status(fd, state):
+    s = {k: read(p) for k, p in SYSFS.items()}
+    s["charging_profiles"] = (read(KB + "/charging_profile/charging_profiles_available") or "").split()
+    for k in ("capacity", "status", "cycle_count", "charge_full", "charge_full_design"):
+        s["bat_" + k] = read(f"{BAT}/{k}")
+    s["fan"] = state["fan"]
+    if fd is not None:
+        s["fan1"], s["fan2"] = (round(ioctl_read(fd, r) * 100 / FAN_MAX) for r in (R_FAN1, R_FAN2))
+        s["temp1"], s["temp2"] = ioctl_read(fd, R_TEMP1), ioctl_read(fd, R_TEMP2)
+        if ioctl_read(fd, R_PROFS_AVAILABLE) == 3:
+            s["perf_profile"] = perf_from_mode(ioctl_read(fd, R_MODE))
+    s["updated"] = int(time.time())
+    return s
+
+
+def open_dev():
+    fd = os.open(DEV, os.O_RDWR)
+    if ioctl_read(fd, R_HWCHECK_UW) != 1:
+        sys.exit("tuxctl: no Uniwill interface in tuxedo_io")
+    return fd
+
+
+def daemon():
+    fd = open_dev()
+    state, mtime, current = load_state(), None, None
+
+    def stop(*_):
+        ioctl_write(fd, W_FANAUTO, 0)  # hand fans back to the EC on exit
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    for key, value in state.items():  # EC forgets some settings across power cycles
+        if key != "fan":
+            try:
+                apply(fd, key, value)
+            except OSError as e:
+                print(f"tuxctl: restore {key}: {e}", file=sys.stderr)
+
+    while True:
+        m = os.stat(STATE).st_mtime if os.path.exists(STATE) else None
+        if m != mtime:
+            mtime, prev = m, state["fan"]
+            state = load_state()
+            if state["fan"] == "auto" and prev != "auto":
+                ioctl_write(fd, W_FANAUTO, 0)
+                current = None
+        if state["fan"] in CURVES:
+            temp = max(ioctl_read(fd, R_TEMP1), ioctl_read(fd, R_TEMP2))
+            target = curve_percent(CURVES[state["fan"]], temp)
+            # Spin up at once, slow down by at most 5%/tick so the fan does not pulse.
+            current = target if current is None or target >= current else max(target, current - 5)
+            duty = round(current * FAN_MAX / 100)
+            ioctl_write(fd, W_FAN1, duty)
+            ioctl_write(fd, W_FAN2, duty)
+        write_atomic(STATUS, json.dumps(status(fd, state)))
+        time.sleep(2)
+
+
+def main(argv):
+    if argv[:1] == ["daemon"]:
+        daemon()
+    elif argv[:1] == ["status"]:
+        fd = open_dev() if os.access(DEV, os.R_OK | os.W_OK) else None
+        print(json.dumps(status(fd, load_state()), indent=2))
+    elif len(argv) == 3 and argv[0] == "set":
+        key, value = argv[1], argv[2]
+        validate(key, value)
+        apply(open_dev() if key == "perf_profile" else None, key, value)
+        state = load_state()
+        state[key] = value
+        write_atomic(STATE, json.dumps(state, indent=2) + "\n")
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
